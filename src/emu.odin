@@ -3,12 +3,16 @@ package gbemu
 import "core:os"
 import "core:fmt"
 import "core:mem"
+import "core:thread"
 
 import sdl "vendor:sdl2"
 
 EmuState :: struct {
-	isPaused, isRunning: bool,
-	ticks: u64
+	isPaused, isRunning, shouldClose: bool,
+	ticks: u64,
+
+	endState: bool,
+	endMsg: string
 }
 
 CartState :: struct {
@@ -37,13 +41,46 @@ RomHeader :: struct {
 emu: EmuState
 cart: CartState
 
+@(private="file") window: ^sdl.Window
+@(private="file") renderer: ^sdl.Renderer
+@(private="file") texture: ^sdl.Texture
+@(private="file") surface: ^sdl.Surface
+
 Emu_Run :: proc(romPath: string) -> (bool, string) {
 	if !load_cartridge(romPath) {
 		return false, "Failed to load ROM"
 	}
 
 	sdl.Init(sdl.INIT_VIDEO)
+	sdl.CreateWindowAndRenderer(1024, 768, sdl.WINDOW_SHOWN, &window, &renderer)
 
+	cpuThread := thread.create_and_start(run_cpu)
+	for !emu.shouldClose {
+		e: sdl.Event
+		for sdl.PollEvent(&e) {
+			if sdl.EventType.WINDOWEVENT == e.type && sdl.WindowEventID.CLOSE == e.window.event {
+				emu.shouldClose = true
+			}
+		}
+	}
+
+	thread.join(cpuThread)
+
+	return emu.endState, emu.endMsg
+}
+
+Emu_Release :: proc() {
+	delete(cart.romData)
+	sdl.DestroyRenderer(renderer)
+	sdl.DestroyWindow(window)
+}
+
+Emu_Cycles :: proc(numCycles: u32) {
+
+}
+
+@(private="file")
+run_cpu :: proc() {
 	CPU_Init()
 
 	emu.isRunning = true
@@ -54,21 +91,19 @@ Emu_Run :: proc(romPath: string) -> (bool, string) {
 		}
 
 		if !CPU_Step() {
-			return false, "CPU stopped"
+			emu.endState, emu.endMsg = false, "CPU stopped"
+			return
 		}
 
 		emu.ticks += 1
 
-		// if emu.ticks >= 30 {
-		// 	return true, "Timed out"
-		// }
+		if emu.shouldClose {
+			emu.endState, emu.endMsg = true, "Closed from interrupt"
+			return
+		}
 	}
 
-	return true, "Ended successfully"
-}
-
-Emu_Cycles :: proc(numCycles: u32) {
-
+	emu.endState, emu.endMsg = true, "Ended successfully"
 }
 
 @(private="file")
