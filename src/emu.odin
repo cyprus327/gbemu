@@ -1,9 +1,13 @@
 package gbemu
 
 import "core:os"
+import "core:io"
 import "core:fmt"
 import "core:mem"
+import "core:bufio"
 import "core:thread"
+import "core:strings"
+import "core:c/libc"
 
 import sdl "vendor:sdl2"
 
@@ -71,12 +75,17 @@ Emu_Run :: proc(romPath: string) -> (bool, string) {
 
 Emu_Release :: proc() {
 	delete(cart.romData)
+	delete(cOutData)
 	sdl.DestroyRenderer(renderer)
 	sdl.DestroyWindow(window)
 }
 
 Emu_Cycles :: proc(numCycles: u32) {
-
+	n := numCycles * 4
+	for i in 0..<n {
+		emu.ticks += 1
+		Timer_Tick()
+	}
 }
 
 @(private="file")
@@ -95,7 +104,9 @@ run_cpu :: proc() {
 			return
 		}
 
-		emu.ticks += 1
+		// if emu.ticks >= 0xA4492 {
+		// 	emu.shouldClose = true
+		// }
 
 		if emu.shouldClose {
 			emu.endState, emu.endMsg = true, "Closed from interrupt"
@@ -108,20 +119,69 @@ run_cpu :: proc() {
 
 @(private="file")
 load_cartridge :: proc(filename: string) -> bool {
-	data: []u8; ok: bool
-	if data, ok = os.read_entire_file(filename); !ok {
+	ok: bool
+	if cart.romData, ok = os.read_entire_file(filename); !ok {
 		return false
 	}
 
+	// handle, err := os.open(filename)
+	// if os.ERROR_NONE != err {
+	// 	fmt.println("FAILED OPENING")
+	// 	return false
+	// }
+	// defer os.close(handle)
+
+	// size := int(os.file_size_from_path(filename))
+	// cart.romData = make([]u8, size)
+
+	// size, err = os.read_full(handle, cart.romData)
+	// if os.ERROR_NONE != err {
+	// 	fmt.println("FAILED READ_FULL")
+	// 	return false
+	// }
+
+	// fmt.println("Read:", size)
+
+	// file := libc.fopen(strings.clone_to_cstring(filename), "rb")
+	// if nil == file {
+	// 	fmt.println("FAILED FOPEN")
+	// 	return false
+	// }
+
+	// libc.fseek(file, 0, libc.Whence.END)
+	// size := libc.ftell(file)
+
+	// libc.rewind(file)
+
+	// cart.romData = make([]u8, size)
+	// libc.fread(raw_data(cart.romData), libc.size_t(size), 1, file)
+	// libc.fclose(file)
+
+	// data, ok := os.read_entire_file("out/romData.asdf")
+	// if !ok {
+	// 	fmt.println("FAILED READING")
+	// 	os.exit(1)
+	// }
+	// defer delete(data)
+
+	// for b, i in data {
+	// 	if b != cart.romData[i] {
+	// 		read_pause(fmt.aprintf("%d) %02X %02X", i, b, cart.romData[i]))
+	// 	}
+	// }
+
+	// ok: bool
+	// cart.romData, ok = os.read_entire_file("out/romData.asdf")
+	// if !ok {
+	// 	fmt.println("FAILED TO READ")
+	// 	return false
+	// }
+
 	cart.filename = filename
 
-	cart.romData = make([]u8, len(data))
-	copy(cart.romData[:], data[:])
-
-	fmt.printfln("Opened: %s, Size: %d", filename, len(data))
+	fmt.printfln("Opened: %s, Size: %d", filename, len(cart.romData))
 
 	cart.header = cast(^RomHeader)(&cart.romData[0x100])
-	cart.header.title[15] = 0
 
 	fmt.printfln("  Cartridge loaded")
 	fmt.printfln("  Title    : %s", cart.header.title)
@@ -133,7 +193,7 @@ load_cartridge :: proc(filename: string) -> bool {
 
 	x: u16 = 0
 	for i := 0x0134; i <= 0x014C; i += 1 {
-		x = x - u16(cart.romData[i] - 1)
+		x -= u16(cart.romData[i] - 1)
 	}
 
 	fmt.printfln("  Checksum : %2.2X (%s)", cart.header.checksum, (x & 0xFF) != 0 ? "PASS" : "FAIL")

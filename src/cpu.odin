@@ -1,7 +1,10 @@
 package gbemu
 
 import "core:os"
+import "core:io"
 import "core:fmt"
+import "core:bufio"
+import "core:strings"
 
 CpuRegisters :: struct {
 	a, f, b, c, d, e, h, l: u8,
@@ -18,12 +21,23 @@ CpuState :: struct {
 	currInst: ^Instruction,
 
 	isHalted, isStepping: bool,
+	intFlags: u8,
 
 	isIntMstOn: bool, // is interrupt master enabled
+	enablingIME: bool,
 	ieReg: u8
 }
 
+TimerState :: struct {
+	div: u16,
+	tima, tma, tac: u8
+}
+
 cpu: CpuState
+timer: TimerState
+
+correctOutput: []string
+cOutData: []u8
 
 CPU_Init :: proc() {
 	instructions[0x00] = Instruction{type = .NOP, mode = .IMP}
@@ -138,8 +152,10 @@ CPU_Init :: proc() {
 	instructions[0xEA] = Instruction{type = .LD, mode = .A16_R, reg1 = .NONE, reg2 = .A}
 
 	// 0xFX LD
-	instructions[0xF2] = Instruction{type = .LD, mode = .R_MR,  reg1 = .A, reg2 = .C}
-	instructions[0xFA] = Instruction{type = .LD, mode = .R_A16, reg1 = .A}
+	instructions[0xF2] = Instruction{type = .LD, mode = .R_MR,   reg1 = .A, reg2 = .C}
+	instructions[0xF8] = Instruction{type = .LD, mode = .HL_SPR, reg1 = .HL, reg2 = .SP}
+	instructions[0xF9] = Instruction{type = .LD, mode = .R_R,    reg1 = .SP, reg2 = .HL}
+	instructions[0xFA] = Instruction{type = .LD, mode = .R_A16,  reg1 = .A}
 
 	// LDH
 	instructions[0xE0] = Instruction{type = .LDH, mode = .A8_R, reg1 = .NONE, reg2 = .A}
@@ -177,7 +193,7 @@ CPU_Init :: proc() {
 	instructions[0xCA] = Instruction{type = .JP,  mode = .D16, cond = .Z}
 	instructions[0xD2] = Instruction{type = .JP,  mode = .D16, cond = .NC}
 	instructions[0xDA] = Instruction{type = .JP,  mode = .D16, cond = .C}
-	instructions[0xE9] = Instruction{type = .JP,  mode = .MR,  reg1 = .HL}
+	instructions[0xE9] = Instruction{type = .JP,  mode = .R,   reg1 = .HL}
 
 	// RET
 	instructions[0xC0] = Instruction{type = .RET, mode = .IMP, cond = .NZ}
@@ -238,6 +254,8 @@ CPU_Init :: proc() {
 	instructions[0x85] = Instruction{type = .ADD, mode = .R_R,  reg1 = .A,  reg2 = .L}
 	instructions[0x86] = Instruction{type = .ADD, mode = .R_MR, reg1 = .A,  reg2 = .HL}
 	instructions[0x87] = Instruction{type = .ADD, mode = .R_R,  reg1 = .A,  reg2 = .A}
+	instructions[0xC6] = Instruction{type = .ADD, mode = .R_D8, reg1 = .A}
+	instructions[0xE8] = Instruction{type = .ADD, mode = .R_D8, reg1 = .SP}
 
 	// ADC
 	instructions[0x88] = Instruction{type = .ADC, mode = .R_R,  reg1 = .A, reg2 = .B}
@@ -248,8 +266,10 @@ CPU_Init :: proc() {
 	instructions[0x8D] = Instruction{type = .ADC, mode = .R_R,  reg1 = .A, reg2 = .L}
 	instructions[0x8E] = Instruction{type = .ADC, mode = .R_MR, reg1 = .A, reg2 = .HL}
 	instructions[0x8F] = Instruction{type = .ADC, mode = .R_R,  reg1 = .A, reg2 = .A}
+	instructions[0xCE] = Instruction{type = .ADC, mode = .R_D8, reg1 = .A}
 
 	// SUB
+	instructions[0xD6] = Instruction{type = .SUB, mode = .R_D8, reg1 = .A}
 	instructions[0x90] = Instruction{type = .SUB, mode = .R_R,  reg1 = .A, reg2 = .B}
 	instructions[0x91] = Instruction{type = .SUB, mode = .R_R,  reg1 = .A, reg2 = .C}
 	instructions[0x92] = Instruction{type = .SUB, mode = .R_R,  reg1 = .A, reg2 = .D}
@@ -260,6 +280,7 @@ CPU_Init :: proc() {
 	instructions[0x97] = Instruction{type = .SUB, mode = .R_R,  reg1 = .A, reg2 = .A}
 
 	// SBC
+	instructions[0xDE] = Instruction{type = .SBC, mode = .R_D8, reg1 = .A}
 	instructions[0x98] = Instruction{type = .SBC, mode = .R_R,  reg1 = .A, reg2 = .B}
 	instructions[0x99] = Instruction{type = .SBC, mode = .R_R,  reg1 = .A, reg2 = .C}
 	instructions[0x9A] = Instruction{type = .SBC, mode = .R_R,  reg1 = .A, reg2 = .D}
@@ -269,37 +290,272 @@ CPU_Init :: proc() {
 	instructions[0x9E] = Instruction{type = .SBC, mode = .R_MR, reg1 = .A, reg2 = .HL}
 	instructions[0x9F] = Instruction{type = .SBC, mode = .R_R,  reg1 = .A, reg2 = .A}
 
-	instructions[0xAF] = Instruction{type = .XOR, mode = .R, reg1 = .A}
+	// AND
+	instructions[0xA0] = Instruction{type = .AND, mode = .R_R,  reg1 = .A, reg2 = .B}
+	instructions[0xA1] = Instruction{type = .AND, mode = .R_R,  reg1 = .A, reg2 = .C}
+	instructions[0xA2] = Instruction{type = .AND, mode = .R_R,  reg1 = .A, reg2 = .D}
+	instructions[0xA3] = Instruction{type = .AND, mode = .R_R,  reg1 = .A, reg2 = .E}
+	instructions[0xA4] = Instruction{type = .AND, mode = .R_R,  reg1 = .A, reg2 = .H}
+	instructions[0xA5] = Instruction{type = .AND, mode = .R_R,  reg1 = .A, reg2 = .L}
+	instructions[0xA6] = Instruction{type = .AND, mode = .R_MR, reg1 = .A, reg2 = .HL}
+	instructions[0xA7] = Instruction{type = .AND, mode = .R_R,  reg1 = .A, reg2 = .A}
+	instructions[0xE6] = Instruction{type = .AND, mode = .R_D8, reg1 = .A}
 
+	// XOR
+	instructions[0xA8] = Instruction{type = .XOR, mode = .R_R,  reg1 = .A, reg2 = .B}
+	instructions[0xA9] = Instruction{type = .XOR, mode = .R_R,  reg1 = .A, reg2 = .C}
+	instructions[0xAA] = Instruction{type = .XOR, mode = .R_R,  reg1 = .A, reg2 = .D}
+	instructions[0xAB] = Instruction{type = .XOR, mode = .R_R,  reg1 = .A, reg2 = .E}
+	instructions[0xAC] = Instruction{type = .XOR, mode = .R_R,  reg1 = .A, reg2 = .H}
+	instructions[0xAD] = Instruction{type = .XOR, mode = .R_R,  reg1 = .A, reg2 = .L}
+	instructions[0xAE] = Instruction{type = .XOR, mode = .R_MR, reg1 = .A, reg2 = .HL}
+	instructions[0xAF] = Instruction{type = .XOR, mode = .R_R,  reg1 = .A, reg2 = .A}
+	instructions[0xEE] = Instruction{type = .XOR, mode = .R_D8, reg1 = .A}
+
+	// OR
+	instructions[0xB0] = Instruction{type = .OR, mode = .R_R,  reg1 = .A, reg2 = .B}
+	instructions[0xB1] = Instruction{type = .OR, mode = .R_R,  reg1 = .A, reg2 = .C}
+	instructions[0xB2] = Instruction{type = .OR, mode = .R_R,  reg1 = .A, reg2 = .D}
+	instructions[0xB3] = Instruction{type = .OR, mode = .R_R,  reg1 = .A, reg2 = .E}
+	instructions[0xB4] = Instruction{type = .OR, mode = .R_R,  reg1 = .A, reg2 = .H}
+	instructions[0xB5] = Instruction{type = .OR, mode = .R_R,  reg1 = .A, reg2 = .L}
+	instructions[0xB6] = Instruction{type = .OR, mode = .R_MR, reg1 = .A, reg2 = .HL}
+	instructions[0xB7] = Instruction{type = .OR, mode = .R_R,  reg1 = .A, reg2 = .A}
+	instructions[0xF6] = Instruction{type = .OR, mode = .R_D8, reg1 = .A}
+
+	// CP
+	instructions[0xB8] = Instruction{type = .CP, mode = .R_R,  reg1 = .A, reg2 = .B}
+	instructions[0xB9] = Instruction{type = .CP, mode = .R_R,  reg1 = .A, reg2 = .C}
+	instructions[0xBA] = Instruction{type = .CP, mode = .R_R,  reg1 = .A, reg2 = .D}
+	instructions[0xBB] = Instruction{type = .CP, mode = .R_R,  reg1 = .A, reg2 = .E}
+	instructions[0xBC] = Instruction{type = .CP, mode = .R_R,  reg1 = .A, reg2 = .H}
+	instructions[0xBD] = Instruction{type = .CP, mode = .R_R,  reg1 = .A, reg2 = .L}
+	instructions[0xBE] = Instruction{type = .CP, mode = .R_MR, reg1 = .A, reg2 = .HL}
+	instructions[0xBF] = Instruction{type = .CP, mode = .R_R,  reg1 = .A, reg2 = .A}
+	instructions[0xFE] = Instruction{type = .CP, mode = .R_D8, reg1 = .A}
+
+	// CPL
+	instructions[0x2F] = Instruction{type = .CPL}
+
+	// RLCA, RRCA, RLA, RRA
+	instructions[0x07] = Instruction{type = .RLCA}
+	instructions[0x0F] = Instruction{type = .RRCA}
+	instructions[0x17] = Instruction{type = .RLA}
+	instructions[0x1F] = Instruction{type = .RRA}
+
+	// SCF, CCF
+	instructions[0x37] = Instruction{type = .SCF}
+	instructions[0x3F] = Instruction{type = .CCF}
+
+	// DAA
+	instructions[0x27] = Instruction{type = .DAA}
+
+	// CB
+	instructions[0xCB] = Instruction{type = .CB, mode = .D8}
+
+	// DI
 	instructions[0xF3] = Instruction{type = .DI}
 
+	// EI
+	instructions[0xFB] = Instruction{type = .EI}
+
+	// STOP, HALT
+	instructions[0x10] = Instruction{type = .STOP}
+	instructions[0x76] = Instruction{type = .HALT}
+
+	// for inst, ind in instructions {
+	// 	if inst.type == InstType.NONE {
+	// 		read_pause(fmt.aprintf("%02X\n", ind))
+	// 	}
+	// }
+
 	cpu.reg.pc = 0x100
-	cpu.reg.a = 1
+	cpu.reg.sp = 0xFFFE
+	cpu.reg.a = 0x01
+	cpu.reg.f = 0xB0
+	cpu.reg.b = 0x00
+	cpu.reg.c = 0x13
+	cpu.reg.d = 0x00
+	cpu.reg.e = 0xD8
+	cpu.reg.h = 0x01
+	cpu.reg.l = 0x4D
+
+	// timer.div = 0xAC00
+	timer.div = 0xABCC
+
+	// file, err := os.open("out/c.txt")
+	// if 0 != err {
+	// 	fmt.println("Failed to read correct output")
+	// 	os.exit(1)
+	// }
+	// defer os.close(file)
+
+	// stream := os.stream_from_handle(file)
+	// reader, ok := io.to_reader(stream)
+	// if !ok {
+	// 	fmt.println("Failed to convert stream to reader")
+	// 	os.exit(1)
+	// }
+
+	// correctOutputBuf = make([]u8, os.file_size_from_path("out/c.txt"))
+	// bufio.reader_init_with_buf(&correctOutput, reader, correctOutputBuf)
+
+	cOutData, ok := os.read_entire_file("out/c.txt")
+	if !ok {
+		fmt.println("Failed to read c.txt")
+		os.exit(1)
+	}
+
+	// str := string(cOutData)
+	// correctOutput = strings.split_lines(str)
+	// for line in 0..<5 {
+	// 	fmt.println(correctOutput[line])
+	// }
 }
 
 CPU_Step :: proc() -> bool {
 	if cpu.isHalted {
-		return false
+		Emu_Cycles(1)
+		if 0 != cpu.intFlags {
+			cpu.isHalted = false
+		}
+	}
+
+	if cpu.isHalted {
+		return true
 	}
 
 	startPC := cpu.reg.pc
 
 	fetch_inst()
+	Emu_Cycles(1)
 	fetch_data()
 
 	z := cpu.reg.f & (1 << 7) != 0 ? 'Z' : '-'
 	n := cpu.reg.f & (1 << 6) != 0 ? 'N' : '-'
 	h := cpu.reg.f & (1 << 5) != 0 ? 'H' : '-'
 	c := cpu.reg.f & (1 << 4) != 0 ? 'C' : '-'
-	fmt.printfln("%08X - %04X: %-4s (%02X %02X %02X), F: %c%c%c%c, A: %02X, BC: %02X%02X, DE: %02X%02X, HL: %02X%02X",
-            emu.ticks, startPC, cpu.currInst.type, cpu.currOp,
-            Bus_Read(startPC + 1), Bus_Read(startPC + 2),
-            z, n, h, c,
-            cpu.reg.a, cpu.reg.b, cpu.reg.c, cpu.reg.d, cpu.reg.e, cpu.reg.h, cpu.reg.l);
+	fmt.printfln("%08X - %04X: %-12s (%02X %02X %02X), F: %c%c%c%c, A: %02X, BC: %02X%02X, DE: %02X%02X, HL: %02X%02X",
+        emu.ticks, startPC, Inst_ToString(cpu.currInst^), cpu.currOp,
+        Bus_Read(startPC + 1), Bus_Read(startPC + 2),
+        z, n, h, c,
+        cpu.reg.a, cpu.reg.b, cpu.reg.c, cpu.reg.d, cpu.reg.e, cpu.reg.h, cpu.reg.l
+    )
+
+    /*
+	@static count: u32 = 0
+	str := correctOutput[count]
+	count += 1
+
+	offset := 0
+	hadErr := false
+	errStr := make([]u8, len(str))
+	defer delete(errStr)
+	for i in 0..<len(str) {
+		errStr[i] = ' '
+	}
+
+	split := strings.split(str, "|")
+
+	check := fmt.aprintf("%08X", emu.ticks)
+	if split[0] != check {
+		for i := offset + 1; i < offset + len(check) - 1; i += 1 {
+			errStr[i] = '-'
+		}
+		errStr[offset] = '^'
+		errStr[offset + len(check) - 1] = '^'
+		hadErr = true
+	}
+	offset += len(check) + 1
+	check = fmt.aprintf("%04X", startPC)
+	if split[1] != check {
+		for i := offset + 1; i < offset + len(check) - 1; i += 1 {
+			errStr[i] = '-'
+		}
+		errStr[offset] = '^'
+		errStr[offset + len(check) - 1] = '^'
+		hadErr = true
+	}
+	offset += len(check) + 1
+	check = fmt.aprintf("%02X%02X%02X", cpu.currOp, Bus_Read(startPC + 1), Bus_Read(startPC + 2))
+	if split[2] != check {
+		for i := offset + 1; i < offset + len(check) - 1; i += 1 {
+			errStr[i] = '-'
+		}
+		errStr[offset] = '^'
+		errStr[offset + len(check) - 1] = '^'
+		hadErr = true
+	}
+	offset += len(check) + 1
+	check = fmt.aprintf("%c%c%c%c", z, n, h, c)
+	if split[3] != check {
+		for i := offset + 1; i < offset + len(check) - 1; i += 1 {
+			errStr[i] = '-'
+		}
+		errStr[offset] = '^'
+		errStr[offset + len(check) - 1] = '^'
+		hadErr = true
+	}
+	offset += len(check) + 1
+	check = fmt.aprintf("%02X", cpu.reg.a)
+	if split[4] != check {
+		for i := offset + 1; i < offset + len(check) - 1; i += 1 {
+			errStr[i] = '-'
+		}
+		errStr[offset] = '^'
+		errStr[offset + len(check) - 1] = '^'
+		hadErr = true
+	}
+	offset += len(check) + 1
+	check = fmt.aprintf("%02X%02X", cpu.reg.b, cpu.reg.c)
+	if split[5] != check {
+		for i := offset + 1; i < offset + len(check) - 1; i += 1 {
+			errStr[i] = '-'
+		}
+		errStr[offset] = '^'
+		errStr[offset + len(check) - 1] = '^'
+		hadErr = true
+	}
+	offset += len(check) + 1
+	check = fmt.aprintf("%02X%02X", cpu.reg.d, cpu.reg.e)
+	if split[6] != check {
+		for i := offset + 1; i < offset + len(check) - 1; i += 1 {
+			errStr[i] = '-'
+		}
+		errStr[offset] = '^'
+		errStr[offset + len(check) - 1] = '^'
+		hadErr = true
+	}
+	offset += len(check) + 1
+	check = fmt.aprintf("%02X%02X", cpu.reg.h, cpu.reg.l)
+	if split[7] != check {
+		for i := offset + 1; i < offset + len(check) - 1; i += 1 {
+			errStr[i] = '-'
+		}
+		errStr[offset] = '^'
+		errStr[offset + len(check) - 1] = '^'
+		hadErr = true
+	}
+	if hadErr {
+		read_pause(fmt.aprintfln("%s\n%s", str, errStr))
+	}
+    // */
 
     if InstType.NONE == cpu.currInst.type || !handle_proc() {
 		fmt.printfln("Unknown instruction: %04X, %02X (%s)", startPC, cpu.currOp, cpu.currInst.type)
 		return false
+	}
+
+	Debug_Update()
+	Debug_Print()
+
+	if cpu.isIntMstOn {
+		Interrupt_HandleAll()
+		cpu.enablingIME = false
+	}
+
+	if cpu.enablingIME {
+		cpu.isIntMstOn = true
 	}
 
 	return true
@@ -334,8 +590,9 @@ fetch_data :: proc() {
 		case .R_D16: fallthrough
 		case .D16: {
 			lo := Bus_Read(cpu.reg.pc)
+			Emu_Cycles(1)
 			hi := Bus_Read(cpu.reg.pc + 1)
-			Emu_Cycles(2)
+			Emu_Cycles(1)
 			cpu.fetchedData = u16(lo) | (u16(hi) << 8)
 			cpu.reg.pc += 2
 		}
@@ -349,7 +606,7 @@ fetch_data :: proc() {
 		}
 		case .R_MR: {
 			addr := read_reg(cpu.currInst.reg2)
-			if RegType.C == cpu.currInst.reg1 {
+			if RegType.C == cpu.currInst.reg2 {
 				addr |= 0xFF00
 			}
 			cpu.fetchedData = u16(Bus_Read(addr))
@@ -400,26 +657,20 @@ fetch_data :: proc() {
 		}
 		case .R_A16: {
 			lo := Bus_Read(cpu.reg.pc)
+			Emu_Cycles(1)
 			hi := Bus_Read(cpu.reg.pc + 1)
-			Emu_Cycles(2)
+			Emu_Cycles(1)
 			cpu.reg.pc += 2
 			addr := u16(lo) | (u16(hi) << 8)
 			cpu.fetchedData = u16(Bus_Read(addr))
 			Emu_Cycles(1)
 		}
+		case .D16_R: fallthrough
 		case .A16_R: {
 			lo := Bus_Read(cpu.reg.pc)
+			Emu_Cycles(1)
 			hi := Bus_Read(cpu.reg.pc + 1)
-			Emu_Cycles(2)
-			cpu.reg.pc += 2
-			cpu.memDest = u16(lo) | (u16(hi) << 8)
-			cpu.destIsMem = true
-			cpu.fetchedData = read_reg(cpu.currInst.reg2)
-		}
-		case .D16_R: {
-			lo := Bus_Read(cpu.reg.pc)
-			hi := Bus_Read(cpu.reg.pc + 1)
-			Emu_Cycles(2)
+			Emu_Cycles(1)
 			cpu.reg.pc += 2
 			cpu.memDest = u16(lo) | (u16(hi) << 8)
 			cpu.destIsMem = true
@@ -495,6 +746,41 @@ set_reg :: proc(type: RegType, val: u16) {
 }
 
 @(private="file")
+read_reg8 :: proc(type: RegType) -> u8 {
+	#partial switch type {
+		case .A: return cpu.reg.a
+		case .F: return cpu.reg.f
+		case .B: return cpu.reg.b
+		case .C: return cpu.reg.c
+		case .D: return cpu.reg.d
+		case .E: return cpu.reg.e
+		case .H: return cpu.reg.h
+		case .L: return cpu.reg.l
+		case .HL: return Bus_Read(read_reg(RegType.HL))
+		case:
+			no_impl("invalid read_reg8")
+			os.exit(1);
+	}
+}
+
+set_reg8 :: proc(type: RegType, val: u8) {
+	#partial switch type {
+		case .A: cpu.reg.a = val
+		case .F: cpu.reg.f = val
+		case .B: cpu.reg.b = val
+		case .C: cpu.reg.c = val
+		case .D: cpu.reg.d = val
+		case .E: cpu.reg.e = val
+		case .H: cpu.reg.h = val
+		case .L: cpu.reg.l = val
+		case .HL: Bus_Write(read_reg(RegType.HL), val)
+		case:
+			no_impl(fmt.aprintf("invalid set_reg8, type: %s, val: %02X", type, val))
+			os.exit(1)
+	}
+}
+
+@(private="file")
 set_flags :: proc(z, n, h, c: i8) {
 	if -1 != z {
 		cpu.reg.f = u8(set_bit(uint(cpu.reg.f), 7, z != 0))
@@ -520,12 +806,144 @@ handle_proc :: proc() -> (ok: bool) {
 		case .NOP: {
 			break
 		}
+		case .STOP: {
+			fmt.println("STOP")
+			return false
+		}
+		case .CB: {
+			@static @rodata
+			regTypes := []RegType{ .B, .C, .D, .E, .H, .L, .HL, .A }
+			reg := regTypes[cpu.fetchedData & 0b111]
+			bit := (cpu.fetchedData >> 3) & 0b111
+			bitOp := (cpu.fetchedData >> 6) & 0b11
+
+			if RegType.HL == reg {
+				Emu_Cycles(2)
+			}
+			Emu_Cycles(1)
+
+			regVal := read_reg8(reg)
+
+			switch bitOp {
+				case 1: // BIT
+					set_flags(0 == (regVal & (1 << bit)), 0, 1, -1)
+					return true
+				case 2: // RST
+					regVal &= ~(1 << bit)
+					set_reg8(reg, regVal)
+					return true
+				case 3: // SET
+					regVal |= (1 << bit)
+					set_reg8(reg, regVal)
+					return true
+			}
+
+			c := get_c_flag(cpu.reg.f)
+			switch bit {
+				case 0: // RLC
+					setC: i8 = 0
+					res := u8((regVal << 1) & 0xFF)
+					if 0 != regVal & (1 << 7) {
+						res |= 1
+						setC = 1
+					}
+					set_reg8(reg, res)
+					set_flags(0 == res, 0, 0, setC)
+				case 1: // RRC
+					old := regVal
+					regVal >>= 1
+					regVal |= (old << 7)
+					set_reg8(reg, regVal)
+					set_flags(0 == regVal, 0, 0, i8(old & 1))
+				case 2: // RL
+					old := regVal
+					regVal <<= 1
+					regVal |= (c ? 1 : 0)
+					set_reg8(reg, regVal)
+					set_flags(0 == regVal, 0, 0, 0 != (old & 0x80))
+				case 3: // RR
+					old := regVal
+					regVal >>= 1
+					regVal |= (c ? 1 : 0) << 7
+					set_reg8(reg, regVal)
+					set_flags(0 == regVal, 0, 0, i8(old & 1))
+				case 4: // SLA
+					old := regVal
+					regVal <<= 1
+					set_reg8(reg, regVal)
+					set_flags(0 == regVal, 0, 0, 0 != (old & 0x80))
+				case 5: // SRA
+					u: u8 = u8(i8(regVal) >> 1)
+					set_reg8(reg, u)
+					set_flags(0 == u, 0, 0, i8(regVal & 1))
+				case 6: // SWAP
+					regVal = ((regVal & 0xF0) >> 4) | ((regVal & 0x0F) << 4)
+					set_reg8(reg, regVal)
+					set_flags(0 == regVal, 0, 0, 0)
+				case 7: // SRL
+					u := regVal >> 1
+					set_reg8(reg, u)
+					set_flags(0 == u, 0, 0, i8(regVal & 1))
+			}
+		}
+		case .RLCA: {
+			u := cpu.reg.a
+			c := (u >> 7) & 1
+			u = (u << 1) | c
+			cpu.reg.a = u
+			set_flags(0, 0, 0, i8(c))
+		}
+		case .RRCA: {
+			u := cpu.reg.a & 1
+			cpu.reg.a >>= 1
+			cpu.reg.a |= (u << 7)
+			set_flags(0, 0, 0, i8(u))
+		}
+		case .RLA: {
+			u := cpu.reg.a
+			c := (u >> 7) & 1
+			cpu.reg.a = (u << 1) | u8(get_c_flag(cpu.reg.f))
+			set_flags(0, 0, 0, i8(c))
+		}
+		case .RRA: {
+			c := cpu.reg.a & 1
+			cpu.reg.a >>= 1
+			cpu.reg.a |= u8((get_c_flag(cpu.reg.f) ? 1 : 0) << 7)
+			set_flags(0, 0, 0, i8(c))
+		}
+		case .DAA: {
+			u, c, f: u8 = 0, 0, cpu.reg.f
+			if get_h_flag(f) || (!get_n_flag(f) && (cpu.reg.a & 0xF) > 9) {
+				u = 6
+			}
+			if get_c_flag(f) || (!get_n_flag(f) && cpu.reg.a > 0x99) {
+				u |= 0x60
+				c = 1
+			}
+			cpu.reg.a = get_n_flag(f) ? u8(i16(cpu.reg.a) - i16(u)) : cpu.reg.a + u
+			set_flags(0 == cpu.reg.a, -1, 0, i8(c))
+		}
+		case .CPL: {
+			cpu.reg.a = ~cpu.reg.a
+			set_flags(-1, 1, 1, -1)
+		}
+		case .SCF: {
+			set_flags(-1, 0, 0, 1)
+		}
+		case .CCF: {
+			set_flags(-1, 0, 0, i8((get_c_flag(cpu.reg.f) ? 1 : 0) ~ 1))
+		}
+		case .HALT: {
+			fmt.println("HALTED")
+			cpu.isHalted = true
+		}
 		case .LD: {
 			if cpu.destIsMem {
-				if is_16bit(cpu.currInst.reg1) {
+				if is_16bit(cpu.currInst.reg2) {
 					Bus_Write16(cpu.memDest, cpu.fetchedData)
+					Emu_Cycles(1)
 				} else {
-					Bus_Write(cpu.memDest, u8(cpu.fetchedData & 0xFF))
+					Bus_Write(cpu.memDest, u8(cpu.fetchedData))
 				}
 				Emu_Cycles(1)
 				break
@@ -533,10 +951,11 @@ handle_proc :: proc() -> (ok: bool) {
 
 			if AddrMode.HL_SPR == cpu.currInst.mode {
 				reg2 := read_reg(cpu.currInst.reg2)
-				hFlag: i8 = (reg2 & 0x0F) + (cpu.fetchedData & 0x0F) >= 0x010
-				cFlag: i8 = (reg2 & 0xFF) + (cpu.fetchedData & 0xFF) >= 0x100
-				set_flags(0, 0, hFlag, cFlag)
-				set_reg(cpu.currInst.reg1, u16(i32(reg2) + i32(cpu.fetchedData)))
+				hFlag: u8 = (reg2 & 0x0F) + (cpu.fetchedData & 0x0F) >= 0x010
+				cFlag: u8 = (reg2 & 0xFF) + (cpu.fetchedData & 0xFF) >= 0x100
+				set_flags(0, 0, 0 != hFlag, 0 != cFlag)
+				set_reg(cpu.currInst.reg1, u16(i32(reg2) + i32(i8(cpu.fetchedData))))
+				break
 			}
 
 			set_reg(cpu.currInst.reg1, cpu.fetchedData)
@@ -564,10 +983,12 @@ handle_proc :: proc() -> (ok: bool) {
 				Emu_Cycles(1)
 			}
 			if check_cond() {
-				lo := stack_pop()
-				hi := stack_pop()
+				lo := Stack_Pop()
+				Emu_Cycles(1)
+				hi := Stack_Pop()
+				Emu_Cycles(1)
 				cpu.reg.pc = (u16(hi) << 8) | u16(lo)
-				Emu_Cycles(3)
+				Emu_Cycles(1)
 			}
 		}
 		case .CALL: {
@@ -576,30 +997,44 @@ handle_proc :: proc() -> (ok: bool) {
 		case .RST: {
 			goto_addr(u16(cpu.currInst.param), true)
 		}
+		case .AND: {
+			cpu.reg.a &= u8(cpu.fetchedData)
+			set_flags(0 == cpu.reg.a, 0, 1, 0)
+		}
 		case .XOR: {
 			cpu.reg.a ~= u8(cpu.fetchedData & 0xFF)
 			set_flags(0 == cpu.reg.a, 0, 0, 0)
 		}
+		case .OR: {
+			cpu.reg.a |= u8(cpu.fetchedData & 0xFF)
+			set_flags(0 == cpu.reg.a, 0, 0, 0)
+		}
+		case .CP: {
+			n := i32(cpu.reg.a) - i32(cpu.fetchedData)
+			set_flags(0 == n, 1, i32(cpu.reg.a & 0xF) - i32(cpu.fetchedData & 0xF) < 0, n < 0)
+		}
 		case .DI: {
 			cpu.isIntMstOn = false
 		}
+		case .EI: {
+			cpu.enablingIME = true
+		}
 		case .POP: {
-			lo := stack_pop()
-			hi := stack_pop()
-			Emu_Cycles(2)
+			lo := Stack_Pop()
+			Emu_Cycles(1)
+			hi := Stack_Pop()
+			Emu_Cycles(1)
 			n := (u16(hi) << 8) | u16(lo)
-			if RegType.AF == cpu.currInst.reg1 {
-				set_reg(RegType.AF, n & 0xFFF0)
-			} else {
-				set_reg(cpu.currInst.reg1, n)
-			}
+			set_reg(cpu.currInst.reg1, RegType.AF == cpu.currInst.reg1 ? n & 0xFFF0 : n)
 		}
 		case .PUSH: {
 			hi := u8((read_reg(cpu.currInst.reg1) >> 8) & 0xFF)
-			lo := u8(read_reg(cpu.currInst.reg2) & 0xFF)
-			stack_push(hi)
-			stack_push(lo)
-			Emu_Cycles(2)
+			lo := u8(read_reg(cpu.currInst.reg1) & 0xFF)
+			Emu_Cycles(1)
+			Stack_Push(hi)
+			Emu_Cycles(1)
+			Stack_Push(lo)
+			Emu_Cycles(1)
 		}
 		case .INC: {
 			val := read_reg(cpu.currInst.reg1) + 1
@@ -608,40 +1043,42 @@ handle_proc :: proc() -> (ok: bool) {
 			}
 			if RegType.HL == cpu.currInst.reg1 && AddrMode.MR == cpu.currInst.mode {
 				hlReg := read_reg(RegType.HL)
-				val = u16(Bus_Read(hlReg) + 1) & 0xFF
+				val = u16(Bus_Read(hlReg)) + 1
+				val &= 0xFF
 				Bus_Write(hlReg, u8(val))
 			} else {
 				set_reg(cpu.currInst.reg1, val)
 				val = read_reg(cpu.currInst.reg1)
 			}
-			if 0x03 == (cpu.currOp & 0x03) {
+			if 0x3 == (cpu.currOp & 0x3) {
 				break
 			}
-			set_flags(0 == val, 0, (val & 0x0F) == 0, -1)
+			set_flags(0 == val, 0, 0 == (val & 0xF), -1)
 		}
 		case .DEC: {
+			r1Orig := read_reg(cpu.currInst.reg1)
 			val := read_reg(cpu.currInst.reg1) - 1
 			if is_16bit(cpu.currInst.reg1) {
 				Emu_Cycles(1)
 			}
 			if RegType.HL == cpu.currInst.reg1 && AddrMode.MR == cpu.currInst.mode {
 				hlReg := read_reg(RegType.HL)
-				val = u16(Bus_Read(hlReg) - 1) & 0xFF
+				val = u16(Bus_Read(hlReg)) - 1
 				Bus_Write(hlReg, u8(val))
 			} else {
 				set_reg(cpu.currInst.reg1, val)
 				val = read_reg(cpu.currInst.reg1)
 			}
-			if 0x0B == (cpu.currOp & 0x0B) {
+			if 0xB == (cpu.currOp & 0xB) {
 				break
 			}
-			set_flags(0 == val, 1, (val & 0x0F) == 0x0F, -1)
+			set_flags(0 == val, 1, 0xF == (val & 0xF), -1)
 		}
 		case .ADD: {
 			reg1 := read_reg(cpu.currInst.reg1)
 			val := u32(reg1) + u32(cpu.fetchedData)
 			if RegType.SP == cpu.currInst.reg1 {
-				val = u32(i32(reg1) + i32(cpu.fetchedData))
+				val = u32(i32(reg1) + i32(i8(cpu.fetchedData)))
 			}
 			z, h, c: i8
 			if is_16bit(cpu.currInst.reg1) {
@@ -650,14 +1087,14 @@ handle_proc :: proc() -> (ok: bool) {
 				h = (reg1 & 0xFFF) + (cpu.fetchedData & 0xFFF) >= 0x1000
 				c = u32(reg1) + u32(cpu.fetchedData) >= 0x10000
 			} else {
-				z = 0 == val & 0xFF
+				z = 0 == (val & 0xFF)
 				h = (reg1 & 0x0F) + (cpu.fetchedData & 0x0F) >= 0x010
-				c = (reg1 & 0xFF) + (cpu.fetchedData & 0xFF) >= 0x100
+				c = i32(reg1 & 0xFF) + i32(cpu.fetchedData & 0xFF) >= 0x100
 			}
 			if RegType.SP == cpu.currInst.reg1 {
 				z = 0
 				h = (reg1 & 0x0F) + (cpu.fetchedData & 0x0F) >= 0x010
-				c = (reg1 & 0xFF) + (cpu.fetchedData & 0xFF) >= 0x100
+				c = i32(reg1 & 0xFF) + i32(cpu.fetchedData & 0xFF) >= 0x100
 			}
 			set_reg(cpu.currInst.reg1, u16(val & 0xFFFF))
 			set_flags(z, 0, h, c)
@@ -665,7 +1102,7 @@ handle_proc :: proc() -> (ok: bool) {
 		case .ADC: {
 			u := cpu.fetchedData
 			a := u16(cpu.reg.a)
-			c := u16(get_carry_flag(cpu.reg.f))
+			c := u16(get_c_flag(cpu.reg.f))
 			cpu.reg.a = u8((a + u + c) & 0xFF)
 			set_flags(0 == cpu.reg.a, 0,
 				(a & 0xF) + (u & 0xF) + c > 0xF,
@@ -673,21 +1110,21 @@ handle_proc :: proc() -> (ok: bool) {
 		}
 		case .SUB: {
 			reg1 := read_reg(cpu.currInst.reg1)
-			val := reg1 + cpu.fetchedData
+			val := reg1 - cpu.fetchedData
 			z := 0 == val
-			h := (reg1 & 0xF) - (cpu.fetchedData & 0xF) < 0
-			c := reg1 - cpu.fetchedData < 0
+			h := (i32(reg1) & 0xF) - (i32(cpu.fetchedData) & 0xF) < 0
+			c := i32(reg1) - i32(cpu.fetchedData) < 0
 			set_reg(cpu.currInst.reg1, val)
 			set_flags(i8(z), 1, i8(h), i8(c))
 		}
 		case .SBC: {
-			reg1 := i32(read_reg(cpu.currInst.reg1))
-			carry := i32(get_carry_flag(cpu.reg.f))
-			val := cpu.fetchedData + u16(carry)
-			z := 0 == reg1 - i32(val)
-			h := (reg1 & 0xF) - i32(cpu.fetchedData & 0xF) - carry < 0
-			c := reg1 - i32(cpu.fetchedData) - carry < 0
-			set_reg(cpu.currInst.reg1, u16(reg1 - i32(val)))
+			reg1 := read_reg(cpu.currInst.reg1)
+			carry := i32(get_c_flag(cpu.reg.f))
+			val := u8(cpu.fetchedData + u16(carry))
+			z := 0 == reg1 - u16(val)
+			h := (i32(reg1) & 0xF) - (i32(cpu.fetchedData) & 0xF) - carry < 0
+			c := i32(reg1) - i32(cpu.fetchedData) - carry < 0
+			set_reg(cpu.currInst.reg1, reg1 - u16(val))
 			set_flags(i8(z), 1, i8(h), i8(c))
 		}
 		case: return false
@@ -703,7 +1140,7 @@ goto_addr :: proc(addr: u16, pushPC: bool) {
 	}
 
 	if pushPC {
-		stack_push16(cpu.reg.pc)
+		Stack_Push16(cpu.reg.pc)
 		Emu_Cycles(2)
 	}
 
@@ -715,51 +1152,106 @@ goto_addr :: proc(addr: u16, pushPC: bool) {
 check_cond :: proc() -> (canJump: bool) {
 	#partial switch cpu.currInst.cond {
 		case .NONE: return true
-		case .C: return get_carry_flag(cpu.reg.f)
-		case .NC: return !get_carry_flag(cpu.reg.f)
-		case .Z: return get_zero_flag(cpu.reg.f)
-		case .NZ: return !get_zero_flag(cpu.reg.f)
+		case .C: return get_c_flag(cpu.reg.f)
+		case .NC: return !get_c_flag(cpu.reg.f)
+		case .Z: return get_z_flag(cpu.reg.f)
+		case .NZ: return !get_z_flag(cpu.reg.f)
 	}
 
 	return false
 }
 
 @(private="file")
-get_zero_flag :: #force_inline proc(fReg: u8) -> bool {
+get_z_flag :: #force_inline proc(fReg: u8) -> bool {
 	return bit(uint(fReg), 7)
 }
 
 @(private="file")
-get_carry_flag :: #force_inline proc(fReg: u8) -> bool {
-	return bit(uint(fReg), 4)
+get_n_flag :: #force_inline proc(fReg: u8) -> bool {
+	return bit(uint(fReg), 6)
 }
 
 @(private="file")
-stack_push :: #force_inline proc(data: u8) {
+get_h_flag :: #force_inline proc(fReg: u8) -> bool {
+	return bit(uint(fReg), 5)
+}
+
+@(private="file")
+get_c_flag :: #force_inline proc(fReg: u8) -> bool {
+	return bit(uint(fReg), 4)
+}
+
+Stack_Push :: #force_inline proc(data: u8) {
 	cpu.reg.sp -= 1
 	Bus_Write(cpu.reg.sp, data)
 }
 
-@(private="file")
-stack_push16 :: #force_inline proc(data: u16) {
-	stack_push(u8((data >> 8) & 0xFF))
-	stack_push(u8(data & 0xFF))
+Stack_Push16 :: #force_inline proc(data: u16) {
+	Stack_Push(u8((data >> 8) & 0xFF))
+	Stack_Push(u8(data & 0xFF))
 }
 
-@(private="file")
-stack_pop :: proc() -> u8 {
+Stack_Pop :: proc() -> u8 {
 	cpu.reg.sp += 1
 	return Bus_Read(cpu.reg.sp - 1)
 }
 
-@(private="file")
-stack_pop16 :: proc() -> u16 {
-	lo := stack_pop()
-	hi := stack_pop()
+Stack_Pop16 :: proc() -> u16 {
+	lo := Stack_Pop()
+	hi := Stack_Pop()
 	return (u16(hi) << 8) | u16(lo)
 }
 
 @(private="file")
 is_16bit :: #force_inline proc(type: RegType) -> bool {
 	return type >= RegType.AF
+}
+
+Timer_Tick :: proc() {
+	prevDiv := timer.div
+	timer.div += 1
+
+	shouldUpdate := false
+	switch timer.tac & 0b11 {
+		case 0:
+			shouldUpdate = 0 != (prevDiv & (1 << 9)) && 0 == (timer.div & (1 << 9))
+		case 1:
+			shouldUpdate = 0 != (prevDiv & (1 << 3)) && 0 == (timer.div & (1 << 3))
+		case 2:
+			shouldUpdate = 0 != (prevDiv & (1 << 5)) && 0 == (timer.div & (1 << 9))
+		case 3:
+			shouldUpdate = 0 != (prevDiv & (1 << 7)) && 0 == (timer.div & (1 << 9))
+	}
+
+	if shouldUpdate && 0 != timer.tac & (1 << 2) {
+		timer.tima += 1
+		if 0xFF == timer.tima {
+			timer.tima = timer.tma
+			Interrupt_Request(InterruptType.TIMER)
+		}
+	}
+}
+
+Timer_Write :: proc(addr: u16, val: u8) {
+	switch addr {
+		case 0xFF04: timer.div = 0
+		case 0xFF05: timer.tima = val
+		case 0xFF06: timer.tma = val
+		case 0xFF07: timer.tac = val
+		case:
+			no_impl("timer write")
+			// exit(1)
+	}
+}
+
+Timer_Read :: proc(addr: u16) -> u8 {
+	switch addr {
+		case 0xFF04: return u8(timer.div >> 8)
+		case 0xFF05: return timer.tima
+		case 0xFF06: return timer.tma
+		case 0xFF07: return timer.tac
+		case:
+			no_impl("timer read")
+			return 0
+	}
 }

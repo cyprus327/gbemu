@@ -9,7 +9,7 @@ InterruptType :: enum {
 }
 
 Interrupt_Request :: proc(type: InterruptType) {
-
+	cpu.intFlags |= u8(type)
 }
 
 Interrupt_HandleAll :: proc() {

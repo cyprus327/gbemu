@@ -33,6 +33,7 @@ Bus_Read :: proc(addr: u16) -> u8 {
 		return cart_read(addr)
 	case 0x8000..=0x9FFF: // char/map data
 		no_impl("READ char/map data")
+		os.exit(1)
 	case 0xA000..=0xBFFF: // cart ram
 		return cart_read(addr)
 	case 0xC000..=0xDFFF: // ram banks (wram)
@@ -45,8 +46,7 @@ Bus_Read :: proc(addr: u16) -> u8 {
 	case 0xFEA0..=0xFEFF: // reserved
 		return 0
 	case 0xFF00..=0xFF7F: // io registers
-		// todo
-		no_impl("READ io registers")
+		return io_read(addr)
 	case 0xFF80..=0xFFFE: // high ram
 		return hram_read(addr)
 	case 0xFFFF: // cpu enable register
@@ -80,8 +80,7 @@ Bus_Write :: proc(addr: u16, val: u8) {
 	case 0xFEA0..=0xFEFF: // reserved
 		no_impl("cannot write to reserved memory")
 	case 0xFF00..=0xFF7F: // io registers
-		fmt.println("UNIMPLEMENTED WRITE TO IO REGISTERS")
-		// no_impl("WRITE io registers")
+		io_write(addr, val)
 	case 0xFF80..=0xFFFE: // high ram
 		hram_write(addr, val)
 	case 0xFFFF: // cpu enable register
@@ -102,6 +101,7 @@ cart_read :: #force_inline proc(addr: u16) -> u8 {
 @(private="file")
 cart_write :: #force_inline proc(addr: u16, val: u8) {
 	no_impl("unsupported cart write")
+	os.exit(1)
 }
 
 // @(private="file")
@@ -115,11 +115,47 @@ wram_write :: #force_inline proc(addr: u16, val: u8) {
 }
 
 @(private="file")
-hram_read :: proc(addr: u16) -> u8 {
+hram_read :: #force_inline proc(addr: u16) -> u8 {
 	return ram.hram[addr - 0xFF80]
 }
 
 @(private="file")
-hram_write :: proc(addr: u16, val: u8) {
+hram_write :: #force_inline proc(addr: u16, val: u8) {
 	ram.hram[addr - 0xFF80] = val
+}
+
+@(private="file")
+serialData: [2]u8
+
+@(private="file")
+io_read :: #force_inline proc(addr: u16) -> u8 {
+	switch addr {
+	case 0xFF01:
+		return serialData[0]
+	case 0xFF02:
+		return serialData[1]
+	case 0xFF0F:
+		return cpu.intFlags
+	case 0xFF04..=0xFF07:
+		return Timer_Read(addr)
+	}
+
+	no_impl(fmt.aprintf("io read (%04X)", addr))
+	return 0
+}
+
+@(private="file")
+io_write :: #force_inline proc(addr: u16, val: u8) {
+	switch addr {
+	case 0xFF01:
+		serialData[0] = val
+	case 0xFF02:
+		serialData[1] = val
+	case 0xFF0F:
+		cpu.intFlags = val
+	case 0xFF04..=0xFF07:
+		Timer_Write(addr, val)
+	case:
+		no_impl("io write")
+	}
 }

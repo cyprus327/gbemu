@@ -1,13 +1,10 @@
 package gbemu
 
-import "core:os"
 import "core:fmt"
-import "core:strconv"
-import "core:strings"
 
 main :: proc() {
-	ok, msg := Emu_Run("roms/tetris.gb");
-	fmt.println(msg)
+	ok, msg := Emu_Run("roms/11.gb");
+	fmt.printfln("%s: %s", ok ? "SUCCESS" : "ERROR", msg)
 
-	delete(cart.romData)
+	Emu_Release()
 }
