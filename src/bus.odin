@@ -32,8 +32,7 @@ Bus_Read :: proc(addr: u16) -> u8 {
 	case 0x0000..=0x7FFF: // rom data
 		return cart_read(addr)
 	case 0x8000..=0x9FFF: // char/map data
-		no_impl("READ char/map data")
-		os.exit(1)
+		return PPU_VramRead(addr)
 	case 0xA000..=0xBFFF: // cart ram
 		return cart_read(addr)
 	case 0xC000..=0xDFFF: // ram banks (wram)
@@ -41,8 +40,7 @@ Bus_Read :: proc(addr: u16) -> u8 {
 	case 0xE000..=0xFDFF: // reserved echo ram
 		return 0
 	case 0xFE00..=0xFE9F: // obj attrib memory
-		// todo
-		no_impl("READ obj attrib mem")
+		return dma.isActive ? 0xFF : PPU_OAMRead(addr)
 	case 0xFEA0..=0xFEFF: // reserved
 		return 0
 	case 0xFF00..=0xFF7F: // io registers
@@ -68,7 +66,7 @@ Bus_Write :: proc(addr: u16, val: u8) {
 	case 0x0000..=0x7FFF: // rom data
 		cart_write(addr, val)
 	case 0x8000..=0x9FFF: // char/map data
-		no_impl("WRITE char/map data")
+		PPU_VramWrite(addr, val)
 	case 0xA000..=0xBFFF: // cart ram
 		cart_write(addr, val)
 	case 0xC000..=0xDFFF: // ram banks (wram)
@@ -76,7 +74,10 @@ Bus_Write :: proc(addr: u16, val: u8) {
 	case 0xE000..=0xFDFF: // reserved echo ram
 		no_impl("WRITE echo ram")
 	case 0xFE00..=0xFE9F: // obj attrib memory
-		no_impl("WRITE obj attrib mem")
+		if dma.isActive {
+			return
+		}
+		PPU_OAMWrite(addr, val)
 	case 0xFEA0..=0xFEFF: // reserved
 		no_impl("cannot write to reserved memory")
 	case 0xFF00..=0xFF7F: // io registers
@@ -101,7 +102,7 @@ cart_read :: #force_inline proc(addr: u16) -> u8 {
 @(private="file")
 cart_write :: #force_inline proc(addr: u16, val: u8) {
 	no_impl("unsupported cart write")
-	os.exit(1)
+	// os.exit(1)
 }
 
 // @(private="file")
@@ -138,6 +139,10 @@ io_read :: #force_inline proc(addr: u16) -> u8 {
 		return cpu.intFlags
 	case 0xFF04..=0xFF07:
 		return Timer_Read(addr)
+	case 0xFF44:
+		@static asdf: u8 = 0
+		asdf += 1
+		return asdf
 	}
 
 	no_impl(fmt.aprintf("io read (%04X)", addr))
@@ -155,6 +160,9 @@ io_write :: #force_inline proc(addr: u16, val: u8) {
 		cpu.intFlags = val
 	case 0xFF04..=0xFF07:
 		Timer_Write(addr, val)
+	case 0xFF46:
+		DMA_Start(val)
+		fmt.println("DMA START")
 	case:
 		no_impl("io write")
 	}

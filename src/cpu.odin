@@ -6,13 +6,13 @@ import "core:fmt"
 import "core:bufio"
 import "core:strings"
 
-CpuRegisters :: struct {
+CPURegisters :: struct {
 	a, f, b, c, d, e, h, l: u8,
 	pc, sp: u16
 }
 
-CpuState :: struct {
-	reg: CpuRegisters,
+CPUState :: struct {
+	reg: CPURegisters,
 
 	fetchedData: u16,
 	memDest: u16,
@@ -33,7 +33,7 @@ TimerState :: struct {
 	tima, tma, tac: u8
 }
 
-cpu: CpuState
+cpu: CPUState
 timer: TimerState
 
 correctOutput: []string

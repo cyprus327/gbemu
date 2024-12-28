@@ -49,6 +49,16 @@ cart: CartState
 @(private="file") renderer: ^sdl.Renderer
 @(private="file") texture: ^sdl.Texture
 @(private="file") surface: ^sdl.Surface
+@(private="file") debugWindow: ^sdl.Window
+@(private="file") debugRenderer: ^sdl.Renderer
+@(private="file") debugTexture: ^sdl.Texture
+@(private="file") debugSurface: ^sdl.Surface
+
+@(private="file") @rodata
+debugScale: i32 = 4
+
+@(private="file") @rodata
+tileColors := []u32{0xFFFFFFFF, 0xFFAAAAAA, 0xFF555555, 0xFF000000}
 
 Emu_Run :: proc(romPath: string) -> (bool, string) {
 	if !load_cartridge(romPath) {
@@ -56,7 +66,20 @@ Emu_Run :: proc(romPath: string) -> (bool, string) {
 	}
 
 	sdl.Init(sdl.INIT_VIDEO)
+
 	sdl.CreateWindowAndRenderer(1024, 768, sdl.WINDOW_SHOWN, &window, &renderer)
+
+	sdl.CreateWindowAndRenderer(16 * 8 * debugScale, 32 * 8 * debugScale, sdl.WINDOW_SHOWN, &debugWindow, &debugRenderer)
+	debugSurface = sdl.CreateRGBSurface(0, 16 * 8 * debugScale + 16 * debugScale, 32 * 8 * debugScale + 64 * debugScale, 32,
+		0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000)
+	debugTexture = sdl.CreateTexture(debugRenderer, sdl.PixelFormatEnum.ARGB8888, sdl.TextureAccess.STREAMING,
+		16 * 8 * debugScale + 16 * debugScale, 32 * 8 * debugScale + 64 * debugScale)
+
+	sdl.SetWindowPosition(window, 180, 120)
+
+	x, y: i32 = 0, 0
+	sdl.GetWindowPosition(window, &x, &y)
+	sdl.SetWindowPosition(debugWindow, x + 1034, y)
 
 	cpuThread := thread.create_and_start(run_cpu)
 	for !emu.shouldClose {
@@ -66,6 +89,8 @@ Emu_Run :: proc(romPath: string) -> (bool, string) {
 				emu.shouldClose = true
 			}
 		}
+
+		update_debug()
 	}
 
 	thread.join(cpuThread)
@@ -76,16 +101,63 @@ Emu_Run :: proc(romPath: string) -> (bool, string) {
 Emu_Release :: proc() {
 	delete(cart.romData)
 	delete(cOutData)
+	sdl.FreeSurface(debugSurface)
+	sdl.FreeSurface(surface)
+	sdl.DestroyTexture(debugTexture)
+	sdl.DestroyTexture(texture)
+	sdl.DestroyRenderer(debugRenderer)
 	sdl.DestroyRenderer(renderer)
+	sdl.DestroyWindow(debugWindow)
 	sdl.DestroyWindow(window)
 }
 
 Emu_Cycles :: proc(numCycles: u32) {
-	n := numCycles * 4
-	for i in 0..<n {
-		emu.ticks += 1
-		Timer_Tick()
+	for cycle in 0..<numCycles {
+		for i in 0..<4 {
+			emu.ticks += 1
+			Timer_Tick()
+		}
+		DMA_Tick()
 	}
+}
+
+@(private="file")
+update_debug :: proc() {
+	screen := sdl.Rect{x = 0, y = 0, w = debugSurface.w, h = debugSurface.h}
+	sdl.FillRect(debugSurface, &screen, 0xFF111111)
+
+	addr: u16 = 0x8000
+	xp, yp, tile: i32 = 0, 0, 0
+
+	// 384 tiles
+	for y: i32 = 0; y < 24; y += 1 {
+		for x: i32 = 0; x < 16; x += 1 {
+			rect: sdl.Rect
+			xd, yd := xp + x * debugScale, yp + y * debugScale
+			for ty: i32 = 0; ty < 16; ty += 2 {
+				b1 := Bus_Read(addr + u16(tile * 16 + ty))
+				b2 := Bus_Read(addr + u16(tile * 16 + ty) + 1)
+				for bit: i8 = 7; bit >= 0; bit -= 1 {
+					hi := u8(0 != b1 & (1 << u8(bit))) << 1
+					lo := u8(0 != b2 & (1 << u8(bit)))
+					rect.x = xd + i32(7 - bit) * debugScale
+					rect.y = yd + ty / 2 * debugScale
+					rect.w = debugScale
+					rect.h = debugScale
+					sdl.FillRect(debugSurface, &rect, tileColors[hi | lo])
+				}
+			}
+			xp += 8 * debugScale
+			tile += 1
+		}
+		yp += 8 * debugScale
+		xp = 0
+	}
+
+	sdl.UpdateTexture(debugTexture, nil, debugSurface.pixels, debugSurface.pitch)
+	sdl.RenderClear(debugRenderer)
+	sdl.RenderCopy(debugRenderer, debugTexture, nil, nil)
+	sdl.RenderPresent(debugRenderer)
 }
 
 @(private="file")
