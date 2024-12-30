@@ -97,6 +97,10 @@ Emu_Run :: proc(romPath: string) -> (bool, string) {
 		for sdl.PollEvent(&e) {
 			if sdl.EventType.WINDOWEVENT == e.type && sdl.WindowEventID.CLOSE == e.window.event {
 				emu.shouldClose = true
+			} else if sdl.EventType.KEYDOWN == e.type {
+				Input_HandleKey(true, e.key.keysym.sym)
+			} else if sdl.EventType.KEYUP == e.type {
+				Input_HandleKey(false, e.key.keysym.sym)
 			}
 		}
 

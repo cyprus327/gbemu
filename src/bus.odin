@@ -131,6 +131,8 @@ hram_write :: #force_inline proc(addr: u16, val: u8) {
 @(private="file")
 io_read :: #force_inline proc(addr: u16) -> u8 {
 	switch addr {
+	case 0xFF00:
+		return Input_GetOutput()
 	case 0xFF01:
 		return ioSerialData[0]
 	case 0xFF02:
@@ -150,6 +152,8 @@ io_read :: #force_inline proc(addr: u16) -> u8 {
 @(private="file")
 io_write :: #force_inline proc(addr: u16, val: u8) {
 	switch addr {
+	case 0xFF00:
+		Input_SetSelect(val)
 	case 0xFF01:
 		ioSerialData[0] = val
 	case 0xFF02:
