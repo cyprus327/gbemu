@@ -6,6 +6,8 @@ import "core:fmt"
 import "core:bufio"
 import "core:strings"
 
+CPU_DEBUG :: false
+
 CPURegisters :: struct {
 	a, f, b, c, d, e, h, l: u8,
 	pc, sp: u16
@@ -35,9 +37,6 @@ TimerState :: struct {
 
 cpu: CPUState
 timer: TimerState
-
-correctOutput: []string
-cOutData: []u8
 
 CPU_Init :: proc() {
 	instructions[0x00] = Instruction{type = .NOP, mode = .IMP}
@@ -382,172 +381,42 @@ CPU_Init :: proc() {
 
 	// timer.div = 0xAC00
 	timer.div = 0xABCC
-
-	// file, err := os.open("out/c.txt")
-	// if 0 != err {
-	// 	fmt.println("Failed to read correct output")
-	// 	os.exit(1)
-	// }
-	// defer os.close(file)
-
-	// stream := os.stream_from_handle(file)
-	// reader, ok := io.to_reader(stream)
-	// if !ok {
-	// 	fmt.println("Failed to convert stream to reader")
-	// 	os.exit(1)
-	// }
-
-	// correctOutputBuf = make([]u8, os.file_size_from_path("out/c.txt"))
-	// bufio.reader_init_with_buf(&correctOutput, reader, correctOutputBuf)
-
-	cOutData, ok := os.read_entire_file("out/c.txt")
-	if !ok {
-		fmt.println("Failed to read c.txt")
-		os.exit(1)
-	}
-
-	// str := string(cOutData)
-	// correctOutput = strings.split_lines(str)
-	// for line in 0..<5 {
-	// 	fmt.println(correctOutput[line])
-	// }
 }
 
 CPU_Step :: proc() -> bool {
-	if cpu.isHalted {
+	if !cpu.isHalted {
+		startPC := cpu.reg.pc
+
+		fetch_inst()
+		Emu_Cycles(1)
+		fetch_data()
+
+		when CPU_DEBUG {
+			z := cpu.reg.f & (1 << 7) != 0 ? 'Z' : '-'
+			n := cpu.reg.f & (1 << 6) != 0 ? 'N' : '-'
+			h := cpu.reg.f & (1 << 5) != 0 ? 'H' : '-'
+			c := cpu.reg.f & (1 << 4) != 0 ? 'C' : '-'
+			fmt.printfln("%08X - %04X: %-12s (%02X %02X %02X), F: %c%c%c%c, A: %02X, BC: %02X%02X, DE: %02X%02X, HL: %02X%02X",
+		        emu.ticks, startPC, Inst_ToString(cpu.currInst^), cpu.currOp,
+		        Bus_Read(startPC + 1), Bus_Read(startPC + 2),
+		        z, n, h, c,
+		        cpu.reg.a, cpu.reg.b, cpu.reg.c, cpu.reg.d, cpu.reg.e, cpu.reg.h, cpu.reg.l
+		    )
+
+			Debug_Update()
+			Debug_Print()
+		}
+
+	    if InstType.NONE == cpu.currInst.type || !handle_proc() {
+			fmt.printfln("Unknown instruction: %04X, %02X (%s)", startPC, cpu.currOp, cpu.currInst.type)
+			return false
+		}
+	} else {
 		Emu_Cycles(1)
 		if 0 != cpu.intFlags {
 			cpu.isHalted = false
 		}
 	}
-
-	if cpu.isHalted {
-		return true
-	}
-
-	startPC := cpu.reg.pc
-
-	fetch_inst()
-	Emu_Cycles(1)
-	fetch_data()
-
-	z := cpu.reg.f & (1 << 7) != 0 ? 'Z' : '-'
-	n := cpu.reg.f & (1 << 6) != 0 ? 'N' : '-'
-	h := cpu.reg.f & (1 << 5) != 0 ? 'H' : '-'
-	c := cpu.reg.f & (1 << 4) != 0 ? 'C' : '-'
-	fmt.printfln("%08X - %04X: %-12s (%02X %02X %02X), F: %c%c%c%c, A: %02X, BC: %02X%02X, DE: %02X%02X, HL: %02X%02X",
-        emu.ticks, startPC, Inst_ToString(cpu.currInst^), cpu.currOp,
-        Bus_Read(startPC + 1), Bus_Read(startPC + 2),
-        z, n, h, c,
-        cpu.reg.a, cpu.reg.b, cpu.reg.c, cpu.reg.d, cpu.reg.e, cpu.reg.h, cpu.reg.l
-    )
-
-    /*
-	@static count: u32 = 0
-	str := correctOutput[count]
-	count += 1
-
-	offset := 0
-	hadErr := false
-	errStr := make([]u8, len(str))
-	defer delete(errStr)
-	for i in 0..<len(str) {
-		errStr[i] = ' '
-	}
-
-	split := strings.split(str, "|")
-
-	check := fmt.aprintf("%08X", emu.ticks)
-	if split[0] != check {
-		for i := offset + 1; i < offset + len(check) - 1; i += 1 {
-			errStr[i] = '-'
-		}
-		errStr[offset] = '^'
-		errStr[offset + len(check) - 1] = '^'
-		hadErr = true
-	}
-	offset += len(check) + 1
-	check = fmt.aprintf("%04X", startPC)
-	if split[1] != check {
-		for i := offset + 1; i < offset + len(check) - 1; i += 1 {
-			errStr[i] = '-'
-		}
-		errStr[offset] = '^'
-		errStr[offset + len(check) - 1] = '^'
-		hadErr = true
-	}
-	offset += len(check) + 1
-	check = fmt.aprintf("%02X%02X%02X", cpu.currOp, Bus_Read(startPC + 1), Bus_Read(startPC + 2))
-	if split[2] != check {
-		for i := offset + 1; i < offset + len(check) - 1; i += 1 {
-			errStr[i] = '-'
-		}
-		errStr[offset] = '^'
-		errStr[offset + len(check) - 1] = '^'
-		hadErr = true
-	}
-	offset += len(check) + 1
-	check = fmt.aprintf("%c%c%c%c", z, n, h, c)
-	if split[3] != check {
-		for i := offset + 1; i < offset + len(check) - 1; i += 1 {
-			errStr[i] = '-'
-		}
-		errStr[offset] = '^'
-		errStr[offset + len(check) - 1] = '^'
-		hadErr = true
-	}
-	offset += len(check) + 1
-	check = fmt.aprintf("%02X", cpu.reg.a)
-	if split[4] != check {
-		for i := offset + 1; i < offset + len(check) - 1; i += 1 {
-			errStr[i] = '-'
-		}
-		errStr[offset] = '^'
-		errStr[offset + len(check) - 1] = '^'
-		hadErr = true
-	}
-	offset += len(check) + 1
-	check = fmt.aprintf("%02X%02X", cpu.reg.b, cpu.reg.c)
-	if split[5] != check {
-		for i := offset + 1; i < offset + len(check) - 1; i += 1 {
-			errStr[i] = '-'
-		}
-		errStr[offset] = '^'
-		errStr[offset + len(check) - 1] = '^'
-		hadErr = true
-	}
-	offset += len(check) + 1
-	check = fmt.aprintf("%02X%02X", cpu.reg.d, cpu.reg.e)
-	if split[6] != check {
-		for i := offset + 1; i < offset + len(check) - 1; i += 1 {
-			errStr[i] = '-'
-		}
-		errStr[offset] = '^'
-		errStr[offset + len(check) - 1] = '^'
-		hadErr = true
-	}
-	offset += len(check) + 1
-	check = fmt.aprintf("%02X%02X", cpu.reg.h, cpu.reg.l)
-	if split[7] != check {
-		for i := offset + 1; i < offset + len(check) - 1; i += 1 {
-			errStr[i] = '-'
-		}
-		errStr[offset] = '^'
-		errStr[offset + len(check) - 1] = '^'
-		hadErr = true
-	}
-	if hadErr {
-		read_pause(fmt.aprintfln("%s\n%s", str, errStr))
-	}
-    // */
-
-    if InstType.NONE == cpu.currInst.type || !handle_proc() {
-		fmt.printfln("Unknown instruction: %04X, %02X (%s)", startPC, cpu.currOp, cpu.currInst.type)
-		return false
-	}
-
-	Debug_Update()
-	Debug_Print()
 
 	if cpu.isIntMstOn {
 		Interrupt_HandleAll()
@@ -934,7 +803,7 @@ handle_proc :: proc() -> (ok: bool) {
 			set_flags(-1, 0, 0, i8((get_c_flag(cpu.reg.f) ? 1 : 0) ~ 1))
 		}
 		case .HALT: {
-			fmt.println("HALTED")
+			// fmt.println("HALTED")
 			cpu.isHalted = true
 		}
 		case .LD: {
@@ -1165,17 +1034,14 @@ check_cond :: proc() -> (canJump: bool) {
 get_z_flag :: #force_inline proc(fReg: u8) -> bool {
 	return bit(uint(fReg), 7)
 }
-
 @(private="file")
 get_n_flag :: #force_inline proc(fReg: u8) -> bool {
 	return bit(uint(fReg), 6)
 }
-
 @(private="file")
 get_h_flag :: #force_inline proc(fReg: u8) -> bool {
 	return bit(uint(fReg), 5)
 }
-
 @(private="file")
 get_c_flag :: #force_inline proc(fReg: u8) -> bool {
 	return bit(uint(fReg), 4)

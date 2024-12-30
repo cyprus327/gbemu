@@ -11,6 +11,9 @@ RamState :: struct {
 @(private="file")
 ram: RamState
 
+@(private="file")
+ioSerialData: [2]u8
+
 /*
 0x0000 - 0x3FFF  rom bank 0
 0x4000 - 0x7FFF  rom bank 1, switchable
@@ -126,23 +129,18 @@ hram_write :: #force_inline proc(addr: u16, val: u8) {
 }
 
 @(private="file")
-serialData: [2]u8
-
-@(private="file")
 io_read :: #force_inline proc(addr: u16) -> u8 {
 	switch addr {
 	case 0xFF01:
-		return serialData[0]
+		return ioSerialData[0]
 	case 0xFF02:
-		return serialData[1]
+		return ioSerialData[1]
 	case 0xFF0F:
 		return cpu.intFlags
 	case 0xFF04..=0xFF07:
 		return Timer_Read(addr)
-	case 0xFF44:
-		@static asdf: u8 = 0
-		asdf += 1
-		return asdf
+	case 0xFF40..=0xFF4B:
+		return LCD_Read(addr)
 	}
 
 	no_impl(fmt.aprintf("io read (%04X)", addr))
@@ -153,16 +151,15 @@ io_read :: #force_inline proc(addr: u16) -> u8 {
 io_write :: #force_inline proc(addr: u16, val: u8) {
 	switch addr {
 	case 0xFF01:
-		serialData[0] = val
+		ioSerialData[0] = val
 	case 0xFF02:
-		serialData[1] = val
+		ioSerialData[1] = val
 	case 0xFF0F:
 		cpu.intFlags = val
 	case 0xFF04..=0xFF07:
 		Timer_Write(addr, val)
-	case 0xFF46:
-		DMA_Start(val)
-		fmt.println("DMA START")
+	case 0xFF40..=0xFF4B:
+		LCD_Write(addr, val)
 	case:
 		no_impl("io write")
 	}

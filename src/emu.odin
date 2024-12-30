@@ -55,10 +55,12 @@ cart: CartState
 @(private="file") debugSurface: ^sdl.Surface
 
 @(private="file") @rodata
-debugScale: i32 = 4
+scale: i32 = 4
 
-@(private="file") @rodata
-tileColors := []u32{0xFFFFFFFF, 0xFFAAAAAA, 0xFF555555, 0xFF000000}
+defaultColors := [4]u32{ 0xFFFFFFFF, 0xFFAAAAAA, 0xFF555555, 0xFF000000 }
+
+WINDOW_W :: 1024
+WINDOW_H :: 768
 
 Emu_Run :: proc(romPath: string) -> (bool, string) {
 	if !load_cartridge(romPath) {
@@ -67,19 +69,27 @@ Emu_Run :: proc(romPath: string) -> (bool, string) {
 
 	sdl.Init(sdl.INIT_VIDEO)
 
-	sdl.CreateWindowAndRenderer(1024, 768, sdl.WINDOW_SHOWN, &window, &renderer)
-
-	sdl.CreateWindowAndRenderer(16 * 8 * debugScale, 32 * 8 * debugScale, sdl.WINDOW_SHOWN, &debugWindow, &debugRenderer)
-	debugSurface = sdl.CreateRGBSurface(0, 16 * 8 * debugScale + 16 * debugScale, 32 * 8 * debugScale + 64 * debugScale, 32,
+	sdl.CreateWindowAndRenderer(WINDOW_W, WINDOW_H, sdl.WINDOW_SHOWN, &window, &renderer)
+	surface = sdl.CreateRGBSurface(0, WINDOW_W, WINDOW_H, 32,
 		0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000)
-	debugTexture = sdl.CreateTexture(debugRenderer, sdl.PixelFormatEnum.ARGB8888, sdl.TextureAccess.STREAMING,
-		16 * 8 * debugScale + 16 * debugScale, 32 * 8 * debugScale + 64 * debugScale)
+	texture = sdl.CreateTexture(renderer,
+		sdl.PixelFormatEnum.ARGB8888, sdl.TextureAccess.STREAMING,
+		WINDOW_W, WINDOW_H)
+
+	sdl.CreateWindowAndRenderer(16 * 8 * scale, 32 * 8 * scale, sdl.WINDOW_SHOWN,
+		&debugWindow, &debugRenderer)
+	debugSurface = sdl.CreateRGBSurface(0,
+		16 * 8 * scale + 16 * scale, 32 * 8 * scale + 64 * scale, 32,
+		0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000)
+	debugTexture = sdl.CreateTexture(debugRenderer,
+		sdl.PixelFormatEnum.ARGB8888, sdl.TextureAccess.STREAMING,
+		16 * 8 * scale + 16 * scale, 32 * 8 * scale + 64 * scale)
 
 	sdl.SetWindowPosition(window, 180, 120)
 
 	x, y: i32 = 0, 0
 	sdl.GetWindowPosition(window, &x, &y)
-	sdl.SetWindowPosition(debugWindow, x + 1034, y)
+	sdl.SetWindowPosition(debugWindow, x + WINDOW_W + 10, y)
 
 	cpuThread := thread.create_and_start(run_cpu)
 	for !emu.shouldClose {
@@ -90,7 +100,24 @@ Emu_Run :: proc(romPath: string) -> (bool, string) {
 			}
 		}
 
-		update_debug()
+		rect := sdl.Rect{w = scale, h = scale}
+		for y = 0; y < RES_Y; y += 1 {
+			rect.y = y * scale
+			for x = 0; x < RES_X; x += 1 {
+				rect.x = x * scale
+				sdl.FillRect(surface, &rect, ppu.videoBuf[y * RES_X + x])
+			}
+		}
+		sdl.UpdateTexture(texture, nil, surface.pixels, surface.pitch)
+		sdl.RenderClear(renderer)
+		sdl.RenderCopy(renderer, texture, nil, nil)
+		sdl.RenderPresent(renderer)
+
+		@static prevFrame: u32 = 0
+		if prevFrame != ppu.frame {
+			update_debug()
+		}
+		prevFrame = ppu.frame
 	}
 
 	thread.join(cpuThread)
@@ -99,8 +126,8 @@ Emu_Run :: proc(romPath: string) -> (bool, string) {
 }
 
 Emu_Release :: proc() {
+	PPU_Release()
 	delete(cart.romData)
-	delete(cOutData)
 	sdl.FreeSurface(debugSurface)
 	sdl.FreeSurface(surface)
 	sdl.DestroyTexture(debugTexture)
@@ -116,6 +143,7 @@ Emu_Cycles :: proc(numCycles: u32) {
 		for i in 0..<4 {
 			emu.ticks += 1
 			Timer_Tick()
+			PPU_Tick()
 		}
 		DMA_Tick()
 	}
@@ -133,24 +161,24 @@ update_debug :: proc() {
 	for y: i32 = 0; y < 24; y += 1 {
 		for x: i32 = 0; x < 16; x += 1 {
 			rect: sdl.Rect
-			xd, yd := xp + x * debugScale, yp + y * debugScale
+			xd, yd := xp + x * scale, yp + y * scale
 			for ty: i32 = 0; ty < 16; ty += 2 {
 				b1 := Bus_Read(addr + u16(tile * 16 + ty))
 				b2 := Bus_Read(addr + u16(tile * 16 + ty) + 1)
 				for bit: i8 = 7; bit >= 0; bit -= 1 {
 					hi := u8(0 != b1 & (1 << u8(bit))) << 1
 					lo := u8(0 != b2 & (1 << u8(bit)))
-					rect.x = xd + i32(7 - bit) * debugScale
-					rect.y = yd + ty / 2 * debugScale
-					rect.w = debugScale
-					rect.h = debugScale
-					sdl.FillRect(debugSurface, &rect, tileColors[hi | lo])
+					rect.x = xd + i32(7 - bit) * scale
+					rect.y = yd + ty / 2 * scale
+					rect.w = scale
+					rect.h = scale
+					sdl.FillRect(debugSurface, &rect, defaultColors[hi | lo])
 				}
 			}
-			xp += 8 * debugScale
+			xp += 8 * scale
 			tile += 1
 		}
-		yp += 8 * debugScale
+		yp += 8 * scale
 		xp = 0
 	}
 
@@ -163,6 +191,7 @@ update_debug :: proc() {
 @(private="file")
 run_cpu :: proc() {
 	CPU_Init()
+	PPU_Init()
 
 	emu.isRunning = true
 	for emu.isRunning {
