@@ -379,8 +379,8 @@ CPU_Init :: proc() {
 	cpu.reg.h = 0x01
 	cpu.reg.l = 0x4D
 
-	// timer.div = 0xAC00
-	timer.div = 0xABCC
+	timer.div = 0xAC00
+	// timer.div = 0xABCC
 }
 
 CPU_Step :: proc() -> bool {
@@ -396,12 +396,13 @@ CPU_Step :: proc() -> bool {
 			n := cpu.reg.f & (1 << 6) != 0 ? 'N' : '-'
 			h := cpu.reg.f & (1 << 5) != 0 ? 'H' : '-'
 			c := cpu.reg.f & (1 << 4) != 0 ? 'C' : '-'
-			fmt.printfln("%08X - %04X: %-12s (%02X %02X %02X), F: %c%c%c%c, A: %02X, BC: %02X%02X, DE: %02X%02X, HL: %02X%02X",
-		        emu.ticks, startPC, Inst_ToString(cpu.currInst^), cpu.currOp,
-		        Bus_Read(startPC + 1), Bus_Read(startPC + 2),
-		        z, n, h, c,
-		        cpu.reg.a, cpu.reg.b, cpu.reg.c, cpu.reg.d, cpu.reg.e, cpu.reg.h, cpu.reg.l
-		    )
+			fmt.printfln("%08X - %04X: %-12s (%02X %02X %02X), F: %c%c%c%c, A: %02X, BC: %02X%02X, DE: %02X%02X, HL: %02X%02X | %04X, %04X, %04X",
+				emu.ticks, startPC, Inst_ToString(cpu.currInst^), cpu.currOp,
+				Bus_Read(startPC + 1), Bus_Read(startPC + 2),
+				z, n, h, c,
+				cpu.reg.a, cpu.reg.b, cpu.reg.c, cpu.reg.d, cpu.reg.e, cpu.reg.h, cpu.reg.l,
+				Bus_Read16(read_reg(.BC)), Bus_Read16(read_reg(.DE)), Bus_Read16(read_reg(.HL))
+			)
 
 			Debug_Update()
 			Debug_Print()
@@ -565,7 +566,7 @@ fetch_data :: proc() {
 	}
 }
 
-@(private="file")
+// @(private="file")
 read_reg :: proc(type: RegType) -> u16 {
 	switch type {
 		case .A: return u16(cpu.reg.a)
@@ -803,7 +804,6 @@ handle_proc :: proc() -> (ok: bool) {
 			set_flags(-1, 0, 0, i8((get_c_flag(cpu.reg.f) ? 1 : 0) ~ 1))
 		}
 		case .HALT: {
-			// fmt.println("HALTED")
 			cpu.isHalted = true
 		}
 		case .LD: {
@@ -812,7 +812,7 @@ handle_proc :: proc() -> (ok: bool) {
 					Bus_Write16(cpu.memDest, cpu.fetchedData)
 					Emu_Cycles(1)
 				} else {
-					Bus_Write(cpu.memDest, u8(cpu.fetchedData))
+					Bus_Write(cpu.memDest, u8(cpu.fetchedData)) // <--
 				}
 				Emu_Cycles(1)
 				break

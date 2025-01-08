@@ -61,6 +61,7 @@ PPU_Release :: proc() {
 
 PPU_Tick :: proc() {
 	ppu.lineTicks += 1
+	// fmt.println("MODE:", int(LCD_GetMode()), LCD_GetMode())
 	switch LCD_GetMode() {
 		case .OAM: {
 			if ppu.lineTicks >= 80 {
@@ -189,6 +190,10 @@ PPU_Tick :: proc() {
 				fmt.printfln("FPS: %d", frameCount)
 				start = end
 				frameCount = 0
+
+				if cart.needsSave {
+					cart_save_battery()
+				}
 			}
 
 			frameCount += 1
@@ -218,10 +223,10 @@ pipeline_process :: proc() {
 
 					// load window tile
 					if is_window_visible() &&
-							queue.fetchX + 7 >= lcd.winX &&
-							queue.fetchX < lcd.winX + RES_Y + 7 &&
-							lcd.yCoord >= lcd.winY &&
-							lcd.yCoord < lcd.winY + RES_X {
+							u16(queue.fetchX) + 7 >= u16(lcd.winX) &&
+							u16(queue.fetchX) < u16(lcd.winX) + RES_Y + 7 &&
+							u16(lcd.yCoord) >= u16(lcd.winY) &&
+							u16(lcd.yCoord) < u16(lcd.winY) + RES_X {
 						tileY := ppu.windowLine / 8
 						a = LCD_WinMapArea() + (u16(queue.fetchX) + 7 - u16(lcd.winX)) / 8 + u16(tileY) * 32
 						queue.bgwFetchData[0] = Bus_Read(a)
@@ -235,8 +240,8 @@ pipeline_process :: proc() {
 					// load sprites
 					for e in ppu.lineSprites {
 						x := e.x - 8 + (lcd.scrollX % 8)
-						if ((x >= queue.fetchX && x < queue.fetchX + 8) ||
-							 (x + 8 >= queue.fetchX && x + 8 < queue.fetchX + 8)) {
+						if ((x >= queue.fetchX && u16(x) < u16(queue.fetchX) + 8) ||
+							 (u16(x) + 8 >= u16(queue.fetchX) && u16(x) + 8 < u16(queue.fetchX) + 8)) {
 							ppu.fetchedEntries[ppu.fetchedEntriesCount] = e
 							ppu.fetchedEntriesCount += 1
 						}
@@ -328,29 +333,29 @@ queue_add :: proc() -> bool {
 
 		if 0 != LCD_ObjEnable() {
 			for e: u8 = 0; e < ppu.fetchedEntriesCount; e += 1 {
-				x := ppu.fetchedEntries[e].x - 8 + (lcd.scrollX % 8)
-				if x + 8 < queue.queueX {
+				x := i32(ppu.fetchedEntries[e].x) - 8 + i32(lcd.scrollX % 8)
+				if x + 8 < i32(queue.queueX) {
 					continue
 				}
 
-				offset := queue.queueX - x
-				if offset > 7 {
+				offset := i32(queue.queueX) - x
+				if offset < 0 || offset > 7 {
 					continue
 				}
 
-				bit := 0 != get_flag_xflip(ppu.fetchedEntries[e]) ? offset : 7 - offset
+				bit := 0 != get_flag_xflip(ppu.fetchedEntries[e]) ? u16(offset) : u16(7 - offset)
 
 				lo = 0 != queue.fetchEntryData[e * 2] & (1 << bit)
 				hi = u8(0 != queue.fetchEntryData[e * 2 + 1] & (1 << bit)) << 1
 
-				if 0 == hi | lo {
+				if 0 == (hi | lo) {
 					continue // transparent
 				}
 
 				if 0 == get_flag_bgp(ppu.fetchedEntries[e]) || 0 == bgColor {
 					pn := 0 != get_flag_palette_num(ppu.fetchedEntries[e])
 					col = pn ? sp2Colors[hi | lo] : sp1Colors[hi | lo]
-					if 0 != hi | lo {
+					if 0 != (hi | lo) {
 						break
 					}
 				}

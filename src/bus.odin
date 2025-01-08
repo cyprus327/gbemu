@@ -67,13 +67,13 @@ Bus_Read16 :: proc(addr: u16) -> u16 {
 Bus_Write :: proc(addr: u16, val: u8) {
 	switch addr {
 	case 0x0000..=0x7FFF: // rom data
-		cart_write(addr, val)
+		cart_write(addr, val) // <---
 	case 0x8000..=0x9FFF: // char/map data
 		PPU_VramWrite(addr, val)
 	case 0xA000..=0xBFFF: // cart ram
 		cart_write(addr, val)
 	case 0xC000..=0xDFFF: // ram banks (wram)
-		wram_write(addr, val)
+		wram_write(addr, val) // <---
 	case 0xE000..=0xFDFF: // reserved echo ram
 		no_impl("WRITE echo ram")
 	case 0xFE00..=0xFE9F: // obj attrib memory
@@ -99,16 +99,61 @@ Bus_Write16 :: proc(addr: u16, val: u16) {
 
 @(private="file")
 cart_read :: #force_inline proc(addr: u16) -> u8 {
-	return cart.romData[addr]
+	if !cart_is_mbc1() || addr < 0x4000 {
+		return cart.romData[addr]
+	}
+
+	if addr >= 0xA000 && addr <= 0xBFFF {
+		if !cart.ramEnabled {
+			return 0xFF
+		}
+
+		return cart.ramBanks[cart.ramBankVal][addr - 0xA000]
+	}
+
+	return cart.romData[u16(cart.romBankVal) * 0x4000 + (addr - 0x4000)]
 }
 
 @(private="file")
 cart_write :: #force_inline proc(addr: u16, val: u8) {
-	no_impl("unsupported cart write")
-	// os.exit(1)
+	if !cart_is_mbc1() {
+		// no_impl("MBC1 only")
+		return
+	}
+
+	switch addr {
+		case 0xA000..=0xBFFF:
+			if !cart.ramEnabled {
+				break
+			}
+			cart.ramBanks[cart.ramBankVal][addr - 0xA000] = val
+			if cart.hasBattery {
+				cart.needsSave = true
+			}
+		case 0x0000..=0x1FFF:
+			cart.ramEnabled = 0xA == (val & 0xF)
+		case 0x2000..=0x3FFF:
+			val := val
+			if 0 == val {
+				val = 1
+			}
+			val &= 0b11111
+			cart.romBankVal = val
+		case 0x4000..=0x5FFF:
+			cart.ramBankVal = val & 0b11
+			if cart.ramBanking && cart.needsSave {
+				cart_save_battery()
+			}
+		case 0x6000..=0x7FFF:
+			cart.bankingMode = val & 0b1
+			cart.ramBanking = 0 != cart.bankingMode
+			if cart.ramBanking && cart.needsSave {
+				cart_save_battery()
+			}
+	}
 }
 
-// @(private="file")
+@(private="file")
 wram_read :: #force_inline proc(addr: u16) -> u8 {
 	return ram.wram[addr - 0xC000]
 }
@@ -141,6 +186,8 @@ io_read :: #force_inline proc(addr: u16) -> u8 {
 		return cpu.intFlags
 	case 0xFF04..=0xFF07:
 		return Timer_Read(addr)
+	case 0xFF10..=0xFF3F:
+		return 0
 	case 0xFF40..=0xFF4B:
 		return LCD_Read(addr)
 	}
@@ -162,6 +209,8 @@ io_write :: #force_inline proc(addr: u16, val: u8) {
 		cpu.intFlags = val
 	case 0xFF04..=0xFF07:
 		Timer_Write(addr, val)
+	case 0xFF10..=0xFF3F:
+		return
 	case 0xFF40..=0xFF4B:
 		LCD_Write(addr, val)
 	case:

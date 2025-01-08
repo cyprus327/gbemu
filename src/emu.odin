@@ -22,7 +22,17 @@ EmuState :: struct {
 CartState :: struct {
 	filename: string,
 	romData: []u8,
-	header: ^RomHeader
+	header: ^RomHeader,
+
+	ramEnabled, ramBanking: bool,
+	bankingMode: u8,
+
+	romBankVal, ramBankVal: u8,
+
+	ramBanks: [16][1024 * 8]u8,
+
+	hasBattery: bool,
+	needsSave: bool
 }
 
 RomHeader :: struct {
@@ -57,14 +67,23 @@ cart: CartState
 @(private="file") @rodata
 scale: i32 = 4
 
+@(private="file")
+fileData: []u8
+
 defaultColors := [4]u32{ 0xFFFFFFFF, 0xFFAAAAAA, 0xFF555555, 0xFF000000 }
 
 WINDOW_W :: 1024
 WINDOW_H :: 768
 
 Emu_Run :: proc(romPath: string) -> (bool, string) {
-	if !load_cartridge(romPath) {
+	if !cart_load(romPath) {
 		return false, "Failed to load ROM"
+	}
+
+	ok: bool
+	fileData, ok = os.read_entire_file("out/zelda.correct")
+	if !ok {
+		return false, "Failed to read zelda.correct"
 	}
 
 	sdl.Init(sdl.INIT_VIDEO)
@@ -132,6 +151,7 @@ Emu_Run :: proc(romPath: string) -> (bool, string) {
 Emu_Release :: proc() {
 	PPU_Release()
 	delete(cart.romData)
+	delete(fileData)
 	sdl.FreeSurface(debugSurface)
 	sdl.FreeSurface(surface)
 	sdl.DestroyTexture(debugTexture)
@@ -156,7 +176,7 @@ Emu_Cycles :: proc(numCycles: u32) {
 @(private="file")
 update_debug :: proc() {
 	screen := sdl.Rect{x = 0, y = 0, w = debugSurface.w, h = debugSurface.h}
-	sdl.FillRect(debugSurface, &screen, 0xFF111111)
+	sdl.FillRect(debugSurface, &screen, 0xFF110000)
 
 	addr: u16 = 0x8000
 	xp, yp, tile: i32 = 0, 0, 0
@@ -193,6 +213,12 @@ update_debug :: proc() {
 }
 
 @(private="file")
+check_err :: proc(orig: rawptr, n: int, ptr: uint) -> bool {
+	data := &fileData[ptr]
+	return 0 != mem.compare_ptrs(orig, data, n)
+}
+
+@(private="file")
 run_cpu :: proc() {
 	CPU_Init()
 	PPU_Init()
@@ -209,9 +235,48 @@ run_cpu :: proc() {
 			return
 		}
 
-		// if emu.ticks >= 0xA4492 {
-		// 	emu.shouldClose = true
-		// }
+when CPU_DEBUG {
+		@static ptr: uint = 0
+		hadErr := false
+
+		if check_err(&cpu.reg, size_of(CPURegisters), ptr) {
+			hadErr = true
+			fmt.println("REGISTERS:\n\t", cpu.reg, "\n\t", (cast(^CPURegisters)&fileData[ptr])^)
+		}
+		ptr += size_of(CPURegisters)
+
+		if check_err(&cpu.fetchedData, size_of(u16), ptr) {
+			hadErr = true
+			fmt.println("FETCHED DATA:", cpu.fetchedData, (cast(^u16)&fileData[ptr])^)
+		}
+		ptr += size_of(u16)
+
+		if check_err(&cpu.memDest, size_of(u16), ptr) {
+			hadErr = true
+			fmt.println("MEM DEST:", cpu.memDest, (cast(^u16)&fileData[ptr])^)
+		}
+		ptr += size_of(u16)
+
+		if check_err(&cpu.currOp, size_of(u8), ptr) {
+			hadErr = true
+			fmt.println("CURR OP:", cpu.currOp, (cast(^u8)&fileData[ptr])^)
+		}
+		ptr += size_of(u8)
+
+		regVals := [3]u16{
+			Bus_Read16(read_reg(.BC)),
+			Bus_Read16(read_reg(.DE)),
+			Bus_Read16(read_reg(.HL))}
+		if check_err(&regVals, size_of(regVals), ptr) {
+			hadErr = true
+			fmt.println("REG VALS:", regVals, (cast(^([3]u16))&fileData[ptr])^)
+		}
+		ptr += size_of(regVals)
+
+		if hadErr {
+			read_pause(fmt.aprintf(""))
+		}
+}
 
 		if emu.shouldClose {
 			emu.endState, emu.endMsg = true, "Closed from interrupt"
@@ -223,62 +288,14 @@ run_cpu :: proc() {
 }
 
 @(private="file")
-load_cartridge :: proc(filename: string) -> bool {
+cart_load :: proc(filename: string) -> bool {
 	ok: bool
 	if cart.romData, ok = os.read_entire_file(filename); !ok {
 		return false
 	}
 
-	// handle, err := os.open(filename)
-	// if os.ERROR_NONE != err {
-	// 	fmt.println("FAILED OPENING")
-	// 	return false
-	// }
-	// defer os.close(handle)
-
-	// size := int(os.file_size_from_path(filename))
-	// cart.romData = make([]u8, size)
-
-	// size, err = os.read_full(handle, cart.romData)
-	// if os.ERROR_NONE != err {
-	// 	fmt.println("FAILED READ_FULL")
-	// 	return false
-	// }
-
-	// fmt.println("Read:", size)
-
-	// file := libc.fopen(strings.clone_to_cstring(filename), "rb")
-	// if nil == file {
-	// 	fmt.println("FAILED FOPEN")
-	// 	return false
-	// }
-
-	// libc.fseek(file, 0, libc.Whence.END)
-	// size := libc.ftell(file)
-
-	// libc.rewind(file)
-
-	// cart.romData = make([]u8, size)
-	// libc.fread(raw_data(cart.romData), libc.size_t(size), 1, file)
-	// libc.fclose(file)
-
-	// data, ok := os.read_entire_file("out/romData.asdf")
-	// if !ok {
-	// 	fmt.println("FAILED READING")
-	// 	os.exit(1)
-	// }
-	// defer delete(data)
-
-	// for b, i in data {
-	// 	if b != cart.romData[i] {
-	// 		read_pause(fmt.aprintf("%d) %02X %02X", i, b, cart.romData[i]))
-	// 	}
-	// }
-
 	// ok: bool
-	// cart.romData, ok = os.read_entire_file("out/romData.asdf")
-	// if !ok {
-	// 	fmt.println("FAILED TO READ")
+	// if cart.romData, ok = os.read_entire_file("out/zelda.asdf"); !ok {
 	// 	return false
 	// }
 
@@ -290,10 +307,10 @@ load_cartridge :: proc(filename: string) -> bool {
 
 	fmt.printfln("  Cartridge loaded")
 	fmt.printfln("  Title    : %s", cart.header.title)
-	fmt.printfln("  Type     : %2.2X (%s)", cart.header.type, get_cart_type_name())
+	fmt.printfln("  Type     : %2.2X (%s)", cart.header.type, "UNIMPLEMENTED")
 	fmt.printfln("  ROM Size : %d KB", int(32 << cart.header.romSize))
 	fmt.printfln("  RAM Size : %2.2X", cart.header.ramSize)
-	fmt.printfln("  LIC Code : %2.2X (%s)", cart.header.licenseeCode, get_cart_lic_name())
+	fmt.printfln("  LIC Code : %2.2X (%s)", cart.header.licenseeCode, "UNIMPLEMENTED")
 	fmt.printfln("  ROM Vers : %2.2X", cart.header.version)
 
 	x: u16 = 0
@@ -303,13 +320,25 @@ load_cartridge :: proc(filename: string) -> bool {
 
 	fmt.printfln("  Checksum : %2.2X (%s)", cart.header.checksum, (x & 0xFF) != 0 ? "PASS" : "FAIL")
 
+	cart.ramBankVal = 0
+	cart.romBankVal = 1
+
+	cart.hasBattery = 3 == cart.header.type
+	if cart.hasBattery {
+		cart_load_battery()
+	}
+
 	return true
 }
 
-get_cart_type_name :: proc() -> string {
-	return "UNIMPLEMENTED"
+cart_is_mbc1 :: #force_inline proc() -> bool {
+	return cart.header.type >= 1 && cart.header.type <= 3
 }
 
-get_cart_lic_name :: proc() -> string {
-	return "UNIMPLEMENTED"
+cart_save_battery :: proc() {
+
+}
+
+cart_load_battery :: proc() {
+
 }
